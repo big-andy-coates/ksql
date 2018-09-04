@@ -13,14 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  **/
+
 package io.confluent.ksql.structured;
-
-import org.apache.kafka.streams.kstream.ValueMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.util.ArrayList;
-import java.util.List;
 
 import io.confluent.ksql.GenericRow;
 import io.confluent.ksql.function.udf.Kudf;
@@ -28,6 +22,11 @@ import io.confluent.ksql.parser.tree.Expression;
 import io.confluent.ksql.util.ExpressionMetadata;
 import io.confluent.ksql.util.GenericRowValueTypeEnforcer;
 import io.confluent.ksql.util.Pair;
+import java.util.ArrayList;
+import java.util.List;
+import org.apache.kafka.streams.kstream.ValueMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class SelectValueMapper implements ValueMapper<GenericRow, GenericRow> {
   private static Logger log = LoggerFactory.getLogger(SelectValueMapper.class);
@@ -36,10 +35,11 @@ class SelectValueMapper implements ValueMapper<GenericRow, GenericRow> {
   private final List<Pair<String, Expression>> expressionPairList;
   private final List<ExpressionMetadata> expressionEvaluators;
 
-  SelectValueMapper(final GenericRowValueTypeEnforcer typeEnforcer,
-                    final List<Pair<String, Expression>> expressionPairList,
-                    final List<ExpressionMetadata> expressionEvaluators
-                    ) {
+  SelectValueMapper(
+      final GenericRowValueTypeEnforcer typeEnforcer,
+      final List<Pair<String, Expression>> expressionPairList,
+      final List<ExpressionMetadata> expressionEvaluators
+  ) {
     this.typeEnforcer = typeEnforcer;
     this.expressionPairList = expressionPairList;
     this.expressionEvaluators = expressionEvaluators;
@@ -66,11 +66,16 @@ class SelectValueMapper implements ValueMapper<GenericRow, GenericRow> {
                         .get(parameterIndexes[j]));
           }
         }
-        newColumns.add(expressionEvaluators.get(i).getExpressionEvaluator()
-            .evaluate(parameterObjects));
-      } catch (Exception e) {
-        log.error("Error calculating column with index " + i + " : "
-            + expressionPairList.get(i).getLeft(), e);
+        newColumns.add(
+            expressionEvaluators.get(i).getExpressionEvaluator().evaluate(parameterObjects)
+        );
+      } catch (final Exception e) {
+        log.error(
+            "Error calculating column with index {} : {}",
+            i,
+            expressionPairList.get(i).getLeft(),
+            e
+        );
         newColumns.add(null);
       }
     }

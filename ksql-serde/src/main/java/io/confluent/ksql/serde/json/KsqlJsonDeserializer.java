@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright 2017 Confluent Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,134 +18,179 @@ package io.confluent.ksql.serde.json;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-
-import org.apache.kafka.common.errors.SerializationException;
-import org.apache.kafka.common.serialization.Deserializer;
-import org.apache.kafka.connect.data.Field;
-import org.apache.kafka.connect.data.Schema;
-
+import io.confluent.ksql.GenericRow;
+import io.confluent.ksql.serde.util.SerdeUtils;
+import io.confluent.ksql.util.KsqlException;
+import io.confluent.ksql.util.SchemaUtil;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-
-import io.confluent.ksql.GenericRow;
-import io.confluent.ksql.util.KsqlException;
-import io.confluent.ksql.util.SchemaUtil;
+import java.util.Map.Entry;
+import java.util.stream.Collectors;
+import org.apache.kafka.common.errors.SerializationException;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.connect.data.Field;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaAndValue;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.json.JsonConverter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KsqlJsonDeserializer implements Deserializer<GenericRow> {
 
-  //TODO: Possibily use Streaming API instead of ObjectMapper for better performance
-  private ObjectMapper objectMapper = new ObjectMapper();
+  private static final Logger LOG = LoggerFactory.getLogger(KsqlJsonSerializer.class);
+
+  private final ObjectMapper objectMapper = new ObjectMapper();
 
   private final Schema schema;
+  private final JsonConverter jsonConverter;
 
   /**
    * Default constructor needed by Kafka
    */
-  public KsqlJsonDeserializer(Schema schema) {
-    this.schema = schema;
+  public KsqlJsonDeserializer(final Schema schema, final boolean isInternal) {
+    // If this is a Deserializer for an internal topic in the streams app
+    if (isInternal) {
+      this.schema = schema;
+    } else {
+      this.schema = SchemaUtil.getSchemaWithNoAlias(schema);
+    }
+    jsonConverter = new JsonConverter();
+    jsonConverter.configure(Collections.singletonMap("schemas.enable", false), false);
   }
 
   @Override
-  public void configure(Map<String, ?> map, boolean b) {
+  public void configure(final Map<String, ?> map, final boolean b) {
   }
 
   @Override
   public GenericRow deserialize(final String topic, final byte[] bytes) {
-    if (bytes == null) {
-      return null;
-    }
     try {
-      return getGenericRow(bytes);
-    } catch (Exception e) {
+      final GenericRow row = getGenericRow(bytes);
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("Deserialized row. topic:{}, row:{}", topic, row);
+      }
+      return row;
+    } catch (final Exception e) {
       throw new SerializationException(
-          "KsqlJsonDeserializer failed to deserialize data for topic: " + topic,
-          e
-      );
+          "KsqlJsonDeserializer failed to deserialize data for topic: " + topic, e);
     }
   }
 
   @SuppressWarnings("unchecked")
-  private GenericRow getGenericRow(byte[] rowJsonBytes) throws IOException {
-    JsonNode jsonNode = objectMapper.readTree(rowJsonBytes);
-    CaseInsensitiveJsonNode caseInsensitiveJsonNode = new CaseInsensitiveJsonNode(jsonNode);
-    Map<String, String> keyMap = caseInsensitiveJsonNode.keyMap;
-    List columns = new ArrayList();
-    for (Field field : schema.fields()) {
-      String jsonFieldName = field.name().substring(field.name().indexOf(".") + 1);
-      JsonNode fieldJsonNode = jsonNode.get(keyMap.get(jsonFieldName));
-      if (fieldJsonNode == null) {
-        columns.add(null);
-      } else {
-        columns.add(enforceFieldType(field.schema(), fieldJsonNode));
-      }
+  private GenericRow getGenericRow(final byte[] rowJsonBytes) throws IOException {
+    if (rowJsonBytes == null) {
+      return null;
+    }
+
+    final JsonNode jsonNode = objectMapper.readTree(rowJsonBytes);
+    final CaseInsensitiveJsonNode caseInsensitiveJsonNode = new CaseInsensitiveJsonNode(jsonNode);
+
+    final SchemaAndValue schemaAndValue = jsonConverter.toConnectData("topic", rowJsonBytes);
+    final Map<String, Object> valueMap = (Map) schemaAndValue.value();
+    if (valueMap == null) {
+      return null;
+    }
+
+    final  Map<String, String> keyMap = caseInsensitiveJsonNode.keyMap;
+    final List<Object> columns = new ArrayList();
+    for (final Field field : schema.fields()) {
+      final Object columnVal = valueMap
+          .get(keyMap.get(field.name()));
+      columns.add(enforceFieldType(field.schema(), columnVal));
 
     }
     return new GenericRow(columns);
   }
 
-  private Object enforceFieldType(Schema fieldSchema, JsonNode fieldJsonNode) {
-
-    if (fieldJsonNode.isNull()) {
+  // This is a temporary requirement until we can ensure that the types that Connect JSON
+  // convertor creates are supported in KSQL.
+  @SuppressWarnings("unchecked")
+  private Object enforceFieldType(final Schema fieldSchema, final Object columnVal) {
+    if (columnVal == null) {
       return null;
     }
     switch (fieldSchema.type()) {
       case BOOLEAN:
-        return fieldJsonNode.asBoolean();
+        return SerdeUtils.toBoolean(columnVal);
       case INT32:
-        return fieldJsonNode.asInt();
+        return SerdeUtils.toInteger(columnVal);
       case INT64:
-        return fieldJsonNode.asLong();
+        return SerdeUtils.toLong(columnVal);
       case FLOAT64:
-        return fieldJsonNode.asDouble();
+        return SerdeUtils.toDouble(columnVal);
       case STRING:
-        if (fieldJsonNode.isTextual()) {
-          return fieldJsonNode.asText();
-        } else {
-          return fieldJsonNode.toString();
-        }
+        return columnVal.toString();
       case ARRAY:
-        ArrayNode arrayNode = (ArrayNode) fieldJsonNode;
-        Class elementClass = SchemaUtil.getJavaType(fieldSchema.valueSchema());
-        Object[] arrayField =
-            (Object[]) java.lang.reflect.Array.newInstance(elementClass, arrayNode.size());
-        for (int i = 0; i < arrayNode.size(); i++) {
-          arrayField[i] = enforceFieldType(fieldSchema.valueSchema(), arrayNode.get(i));
-        }
-        return arrayField;
+        return enforceFieldTypeForArray(fieldSchema, (List<?>) columnVal);
       case MAP:
-        Map<String, Object> mapField = new HashMap<>();
-        Iterator<Map.Entry<String, JsonNode>> iterator = fieldJsonNode.fields();
-        while (iterator.hasNext()) {
-          Map.Entry<String, JsonNode> entry = iterator.next();
-          mapField.put(
-              entry.getKey(),
-              enforceFieldType(
-                fieldSchema.valueSchema(),
-                entry.getValue()
-            )
-          );
-        }
-        return mapField;
+        return enforceFieldTypeForMap(fieldSchema, (Map<String, Object>) columnVal);
+      case STRUCT:
+        return enforceFieldTypeForStruct(fieldSchema, (Map<String, Object>) columnVal);
       default:
         throw new KsqlException("Type is not supported: " + fieldSchema.type());
-
     }
-
   }
 
-  static class CaseInsensitiveJsonNode {
+  private List<?> enforceFieldTypeForArray(final Schema fieldSchema, final List<?> arrayList) {
+    return arrayList.stream()
+        .map(item -> enforceFieldType(fieldSchema.valueSchema(), item))
+        .collect(Collectors.toList());
+  }
 
-    Map<String, String> keyMap = new HashMap<>();
+  private Map<String, Object> enforceFieldTypeForMap(
+      final Schema fieldSchema,
+      final Map<String, ?> columnMap) {
+    return columnMap.entrySet().stream()
+        .collect(Collectors.toMap(
+            e -> enforceFieldType(Schema.OPTIONAL_STRING_SCHEMA, e.getKey()).toString(),
+            e -> enforceFieldType(fieldSchema.valueSchema(), e.getValue())
+        ));
+  }
 
-    CaseInsensitiveJsonNode(JsonNode jsonNode) {
-      Iterator<String> fieldNames = jsonNode.fieldNames();
+  private Struct enforceFieldTypeForStruct(
+      final Schema fieldSchema,
+      final Map<String, ?> structMap) {
+    final Struct columnStruct = new Struct(fieldSchema);
+    final Map<String, String> caseInsensitiveStructFieldNameMap =
+        getCaseInsensitiveStructFieldNameMap(structMap);
+    fieldSchema.fields()
+        .forEach(
+            field -> columnStruct.put(field.name(),
+                enforceFieldType(
+                    field.schema(), structMap.get(
+                        caseInsensitiveStructFieldNameMap.get(field.name().toUpperCase())
+                    ))));
+    return columnStruct;
+  }
+
+  private Map<String, String> getCaseInsensitiveStructFieldNameMap(
+      final Map<String, ?> structMap
+  ) {
+    return structMap.entrySet().stream()
+        .collect(Collectors.toMap(
+            e -> e.getKey().toUpperCase(),
+            Entry::getKey
+        ));
+  }
+
+  @Override
+  public void close() {
+  }
+
+  private static final class CaseInsensitiveJsonNode {
+
+    private final Map<String, String> keyMap = new HashMap<>();
+
+    private CaseInsensitiveJsonNode(final JsonNode jsonNode) {
+      final Iterator<String> fieldNames = jsonNode.fieldNames();
       while (fieldNames.hasNext()) {
-        String fieldName = fieldNames.next();
+        final String fieldName = fieldNames.next();
         if (fieldName.startsWith("@")) {
           if (fieldName.length() == 1) {
             throw new KsqlException("Field name cannot be '@'.");
@@ -157,12 +202,5 @@ public class KsqlJsonDeserializer implements Deserializer<GenericRow> {
 
       }
     }
-
-  }
-
-
-  @Override
-  public void close() {
-
   }
 }
